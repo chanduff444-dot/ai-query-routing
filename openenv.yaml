@@ -1,0 +1,52 @@
+name: ai-query-routing-env
+version: 1.0.0
+description: >
+  RL environment simulating real-world AI query routing.
+  Agent learns to select the optimal model (small/medium/large)
+  based on query complexity and budget to maximize accuracy
+  while minimizing token cost.
+
+reward: continuous
+reward_range: [-1.0, 1.0]
+max_steps: 10
+inference_entry: inference.py
+
+observation_space:
+  query: string
+  query_domain: string
+  complexity: float
+  budget_remaining: float
+  accuracy: float
+  last_accuracy: float
+  step_number: int
+  accuracy_history: list
+  available_models: list
+
+action_space:
+  model_id: string
+  model_tier: string
+  prompt_strategy: string
+  tools: list
+  trim_context: bool
+  max_tokens: int
+
+tasks:
+  - id: 1
+    level: easy
+    score_range: [0.501, 0.999]
+    description: Single-turn routing — cheapest model achieving accuracy >= 0.75
+  - id: 2
+    level: medium
+    score_range: [0.301, 0.999]
+    description: Five queries within fixed budget — allocate spend wisely
+  - id: 3
+    level: hard
+    score_range: [0.001, 0.999]
+    description: Multi-step tool pipeline — web search, reasoning, code execution
+
+runtime:
+  cpu: 2
+  ram_gb: 8
+  timeout_minutes: 20
+  python: "3.11"
+  interface: openai-compatible
