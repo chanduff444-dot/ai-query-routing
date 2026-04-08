@@ -1,9 +1,13 @@
+from types import SimpleNamespace
 from uuid import uuid4
 import random
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import State
 
+
+def safe_score(x):
+    return max(0.001, min(0.999, x))
 try:
     from ..models import AiQueryRoutingAction, AiQueryRoutingObservation
 except ImportError:
@@ -42,30 +46,32 @@ class AiQueryRoutingEnvironment(Environment):
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
 
     def __init__(self, task_id: int = 1):
-        self.task_id          = task_id
-        self._state           = State(episode_id=str(uuid4()), step_count=0)
+        self.task_id = task_id
+        self._state = State(episode_id=str(uuid4()), step_count=0)
         self.accuracy_history = []
-        self.query            = ""
-        self.query_domain     = "factual"
-        self.complexity       = 0.5
-        self.budget           = EPISODE_BUDGET
-        self.total_cost       = 0.0
-        self.resolved         = False
+        self.query = ""
+        self.query_domain = "factual"
+        self.complexity = 0.5
+        self.budget = EPISODE_BUDGET
+        self.total_cost = 0.0
+        self.resolved = False
+        self.total_tokens = 0
 
     def reset(self, seed=None) -> AiQueryRoutingObservation:
         if seed is not None:
             random.seed(seed)
 
-        self._state           = State(episode_id=str(uuid4()), step_count=0)
+        self._state = State(episode_id=str(uuid4()), step_count=0)
         self.accuracy_history = []
-        self.total_cost       = 0.0
-        self.resolved         = False
+        self.total_cost = 0.0
+        self.resolved = False
+        self.total_tokens = 0
 
         query_text, domain, complexity = random.choice(QUERIES)
-        self.query        = query_text
+        self.query = query_text
         self.query_domain = domain
-        self.complexity   = complexity
-        self.budget       = EPISODE_BUDGET
+        self.complexity = complexity
+        self.budget = EPISODE_BUDGET
 
         return AiQueryRoutingObservation(
             query=self.query,
@@ -84,7 +90,7 @@ class AiQueryRoutingEnvironment(Environment):
     def step(self, action: AiQueryRoutingAction) -> AiQueryRoutingObservation:
         self._state.step_count += 1
 
-        model_id   = getattr(action, "model_id",   "gemini-flash")
+        model_id = getattr(action, "model_id", "gemini-flash")
         model_tier = getattr(action, "model_tier", "small")
 
         model_info = next(
@@ -93,29 +99,30 @@ class AiQueryRoutingEnvironment(Environment):
 
         if model_info:
             base_quality = model_info["quality"]
-            cost         = model_info["cost"]
+            cost = model_info["cost"]
         else:
             tier_defaults = {
                 "small":  {"quality": 0.75, "cost": 0.05},
                 "medium": {"quality": 0.85, "cost": 0.10},
                 "large":  {"quality": 0.95, "cost": 0.20},
             }
-            d            = tier_defaults.get(model_tier, tier_defaults["small"])
+            d = tier_defaults.get(model_tier, tier_defaults["small"])
             base_quality = d["quality"]
-            cost         = d["cost"]
+            cost = d["cost"]
 
         # accuracy drops with complexity
         accuracy = base_quality - (self.complexity * 0.2)
         accuracy = round(max(0.001, min(0.999, accuracy)), 4)
 
-        self.budget     = round(max(0.001, self.budget - cost), 4)
+        self.budget = round(max(0.0, self.budget - cost), 4)
         self.total_cost = round(self.total_cost + cost, 4)
+        self.total_tokens += int(getattr(action, "max_tokens", 512))
         self.accuracy_history.append(accuracy)
 
         # resolution bonus for task 3
         resolution_bonus = 0.0
         if self.task_id == 3 and self._state.step_count >= 3:
-            self.resolved    = True
+            self.resolved = True
             resolution_bonus = 0.2
 
         # quality bonus if accuracy beats previous mean
@@ -134,12 +141,12 @@ class AiQueryRoutingEnvironment(Environment):
         )
         reward = round(max(0.001, min(0.999, reward)), 4)
 
-        done = (
-            self.budget <= 0
-            or self._state.step_count >= MAX_STEPS
-            or (self.task_id == 1 and self._state.step_count >= 1)
-            or (self.task_id == 2 and self._state.step_count >= 5)
-        )
+        if self.task_id == 1:
+            done = self._state.step_count >= 1
+        elif self.task_id == 2:
+            done = self._state.step_count >= 5 or self.budget <= 0.001
+        else:  # task 3
+            done = self._state.step_count >= MAX_STEPS or self.budget <= 0.001
 
         if done:
             self.resolved = True
@@ -164,21 +171,37 @@ class AiQueryRoutingEnvironment(Environment):
     def get_score(self) -> float:
         if self.task_id == 1:
             acc = self.accuracy_history[-1] if self.accuracy_history else 0.001
-            return grade_task1(acc, self.total_cost, EPISODE_BUDGET)
+            score = grade_task1(acc, self.total_cost, EPISODE_BUDGET)
+
         elif self.task_id == 2:
-            return grade_task2(
+            score = grade_task2(
                 self.accuracy_history, self.total_cost, EPISODE_BUDGET
             )
+
         else:
-            return grade_task3(
-                self.resolved,
-                self.accuracy_history,
-                self.total_cost,
-                EPISODE_BUDGET,
-                self._state.step_count,
-                MAX_STEPS,
-            )
+            score = grade_task3(
+            self.resolved,
+            self.accuracy_history,
+            self.total_cost,
+            EPISODE_BUDGET,
+            self._state.step_count,
+            MAX_STEPS,
+        )
+
+        return safe_score(score)
 
     @property
-    def state(self) -> State:
-        return self._state
+    def state(self):
+        return SimpleNamespace(
+            episode_id=self._state.episode_id,
+            step_count=self._state.step_count,
+            accuracy_history=self.accuracy_history.copy(),
+            total_tokens=self.total_tokens,
+            total_cost_usd=self.total_cost,
+            budget_remaining=self.budget,
+            resolved=self.resolved,
+            query=self.query,
+            query_domain=self.query_domain,
+            complexity=self.complexity,
+            score=self.get_score(),
+        )
